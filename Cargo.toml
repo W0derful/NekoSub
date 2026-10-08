@@ -1,0 +1,26 @@
+[package]
+name = "NekoSub"
+version = "0.1.0"
+edition = "2024"
+description = "NekoSub（猫译幕）— 终端实时语音翻译字幕"
+
+[[bin]]
+name = "nsub"
+path = "src/main.rs"
+
+[features]
+default = []
+vulkan = ["yamabiko-whisper/vulkan"]
+cuda = ["yamabiko-whisper/cuda"]
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive"] }
+cpal = { version = "0.18", features = ["pulseaudio"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+toml = "0.8"
+yamabiko-whisper = "0.2"
