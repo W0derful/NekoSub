@@ -157,8 +157,24 @@ fn append_context(mut prompt: String, history: &[Turn]) -> String {
     prompt
 }
 
-/// 小翻译模型偶尔会把提示模板复述进译文（出现「原文：」「译文：」「上文」等标记），
-/// 只保留真正的译文部分，防止污染上下文后滚雪球。
+/// 输出疑似"复述/总结"而非单句译文：空、多行、句号过多、或长度远超原文。
+fn is_suspicious(source: &str, out: &str) -> bool {
+    let out = out.trim();
+    if out.is_empty() {
+        return true;
+    }
+    let lines = out.lines().filter(|l| !l.trim().is_empty()).count();
+    if lines > 1 {
+        return true;
+    }
+    if out.matches('。').count() > 2 {
+        return true;
+    }
+    out.chars().count() > source.chars().count() * 4 + 30
+}
+
+/// 小翻译模型偶尔会把提示模板复述进译文（出现「原文：」「译文：」「上文」等标记）
+/// 或整段总结上文，只保留真正的译文部分，防止污染上下文后滚雪球。
 pub fn sanitize_translation(raw: &str) -> String {
     let mut s = raw.trim();
     loop {
@@ -174,7 +190,8 @@ pub fn sanitize_translation(raw: &str) -> String {
         };
         s = s[i + marker_len..].trim();
     }
-    if s.contains("（上文") {
+    // 多行输出取最后一行：总结式复述里当前句的译文总是排在最后
+    if s.contains('\n') || s.contains("（上文") {
         s = s.lines().map(str::trim).filter(|l| !l.is_empty()).last().unwrap_or("");
     }
     s.to_string()
@@ -268,7 +285,16 @@ impl Translator {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
             match self.try_translate(text, history).await {
-                Ok(t) => return Ok(t),
+                Ok(raw) => {
+                    // 小翻译模型有时把上下文整段复述/总结出来，此时退回无上下文重译
+                    if history.is_empty() || !is_suspicious(text, &raw) {
+                        return finish_text(&raw);
+                    }
+                    match self.try_translate(text, &[]).await {
+                        Ok(clean) => return finish_text(&clean),
+                        Err(e) => last_err = e,
+                    }
+                }
                 Err(e) => last_err = e,
             }
         }
@@ -313,7 +339,7 @@ impl Translator {
             .first()
             .and_then(|c| c.message.content.as_deref())
             .unwrap_or("");
-        finish_text(content)
+        Ok(content.trim().to_string())
     }
 
     async fn try_anthropic(&self, text: &str, history: &[Turn]) -> Result<String> {
@@ -345,7 +371,7 @@ impl Translator {
             .filter_map(|b| b.text.as_deref())
             .collect::<Vec<_>>()
             .join("");
-        finish_text(&content)
+        Ok(content.trim().to_string())
     }
 }
 
@@ -514,5 +540,21 @@ mod tests {
             sanitize_translation("（上文2）译文：（上文1）原文：えっとバーナー\n（上文1）译文：呃，巴纳"),
             "呃，巴纳"
         );
+    }
+
+    #[test]
+    fn sanitize_drops_recap_blocks() {
+        // 实际日志里的"总结式复述"：多行流水账，当前句译文在最后
+        let recap = "报告游戏的话，虽然可以购买，不过价格只有450日元而已。\n是啊，今天真是令人惊讶啊。\nyoutube也……\n是的，两个人一起购买的话……";
+        assert_eq!(sanitize_translation(recap), "是的，两个人一起购买的话……");
+    }
+
+    #[test]
+    fn suspicious_outputs_detected() {
+        let recap = "报告游戏的话，虽然可以购买。\n是啊，今天真是令人惊讶啊。\n是的，两个人一起购买的话……";
+        assert!(is_suspicious("休みにだいぶ休みになってるやつ買っちゃう", recap));
+        assert!(is_suspicious("ねえ", ""));
+        assert!(is_suspicious("ねえ", "嗯。是啊。好的。知道了。"));
+        assert!(!is_suspicious("そうねみんなのおすすめいっぱい聞けて面白かったな", "是啊，能听到很多人的推荐，真是有趣啊。"));
     }
 }
