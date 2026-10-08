@@ -144,22 +144,40 @@ fn build_system_prompt(from: &str, to: &str, custom: Option<&str>) -> String {
     }
 }
 
-fn build_user_content(text: &str, history: &[Turn]) -> String {
+/// 上下文放 system 而不是 user：小翻译模型会把 user 消息整体当待译文本，
+/// 上下文混进去会被原样复述出来。
+fn append_context(mut prompt: String, history: &[Turn]) -> String {
     if history.is_empty() {
-        return text.to_string();
+        return prompt;
     }
-    let mut out = String::new();
+    prompt.push_str("\n\n对话上文（仅供理解语境，不要输出，只翻译用户消息）：");
     for (i, turn) in history.iter().enumerate() {
-        out.push_str(&format!(
-            "（上文{}）原文：{}\n（上文{}）译文：{}\n",
-            i + 1,
-            turn.source,
-            i + 1,
-            turn.target
-        ));
+        prompt.push_str(&format!("\n{}. {} → {}", i + 1, turn.source, turn.target));
     }
-    out.push_str(&format!("原文：{text}"));
-    out
+    prompt
+}
+
+/// 小翻译模型偶尔会把提示模板复述进译文（出现「原文：」「译文：」「上文」等标记），
+/// 只保留真正的译文部分，防止污染上下文后滚雪球。
+pub fn sanitize_translation(raw: &str) -> String {
+    let mut s = raw.trim();
+    loop {
+        let cut = match (s.rfind("译文："), s.rfind("原文：")) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        let Some(i) = cut else { break };
+        let marker_len = if s[i..].starts_with("译文：") {
+            "译文：".len()
+        } else {
+            "原文：".len()
+        };
+        s = s[i + marker_len..].trim();
+    }
+    if s.contains("（上文") {
+        s = s.lines().map(str::trim).filter(|l| !l.is_empty()).last().unwrap_or("");
+    }
+    s.to_string()
 }
 
 /// 任意 OpenAI / Anthropic 兼容端点的通用翻译器。
@@ -271,11 +289,11 @@ impl Translator {
             messages: vec![
                 Message {
                     role: "system",
-                    content: self.system_prompt.clone(),
+                    content: append_context(self.system_prompt.clone(), history),
                 },
                 Message {
                     role: "user",
-                    content: build_user_content(text, history),
+                    content: text.to_string(),
                 },
             ],
             max_tokens: self.max_tokens,
@@ -304,10 +322,10 @@ impl Translator {
             model: &self.model,
             max_tokens: self.max_tokens,
             temperature: self.temperature,
-            system: self.system_prompt.clone(),
+            system: append_context(self.system_prompt.clone(), history),
             messages: vec![Message {
                 role: "user",
-                content: build_user_content(text, history),
+                content: text.to_string(),
             }],
         };
 
@@ -356,11 +374,11 @@ async fn send(req: reqwest::RequestBuilder) -> Result<String> {
 }
 
 fn finish_text(content: &str) -> Result<String> {
-    let content = content.trim();
+    let content = sanitize_translation(content);
     if content.is_empty() {
         bail!("翻译 API 返回了空译文");
     }
-    Ok(content.to_string())
+    Ok(content)
 }
 
 #[derive(Serialize)]
@@ -469,13 +487,32 @@ mod tests {
     }
 
     #[test]
-    fn user_content_with_history() {
+    fn context_goes_to_system_not_user() {
         let history = vec![Turn {
             source: "こんにちは".into(),
             target: "你好".into(),
         }];
-        let s = build_user_content("ありがとう", &history);
-        assert!(s.contains("上文1"));
-        assert!(s.ends_with("原文：ありがとう"));
+        let s = append_context("只输出译文。".to_string(), &history);
+        assert!(s.contains("对话上文"));
+        assert!(s.contains("こんにちは → 你好"));
+        assert_eq!(append_context("x".into(), &[]), "x");
+    }
+
+    #[test]
+    fn sanitize_strips_echoed_prompt() {
+        // 实际日志里的复述形态：多层嵌套也要修干净
+        assert_eq!(sanitize_translation("你好"), "你好");
+        assert_eq!(
+            sanitize_translation("（上文1）原文：これ?\n（上文1）译文：这个？"),
+            "这个？"
+        );
+        assert_eq!(
+            sanitize_translation("（上文1）原文：啊\n（上文1）译文：啊\n原文：死亡之旅1245日元"),
+            "死亡之旅1245日元"
+        );
+        assert_eq!(
+            sanitize_translation("（上文2）译文：（上文1）原文：えっとバーナー\n（上文1）译文：呃，巴纳"),
+            "呃，巴纳"
+        );
     }
 }

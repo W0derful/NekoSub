@@ -117,7 +117,8 @@ pub async fn run(cfg: &Config, cli_api_key: Option<&str>) -> Result<()> {
             .as_deref()
             .map(crate::config::expand_tilde),
     );
-    let mut state = State::new(cfg.translate.context_sentences.max(1));
+    // context_sentences = 0 表示不带翻译上下文
+    let mut state = State::new(cfg.translate.context_sentences);
     let (res_tx, mut res_rx) = tokio::sync::mpsc::unbounded_channel::<Translated>();
     let started = std::time::Instant::now();
 

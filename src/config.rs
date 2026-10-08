@@ -103,7 +103,8 @@ pub struct TranslateConfig {
     pub model: Option<String>,
     pub max_tokens: u32,
     pub temperature: f32,
-    /// 附带的上下文句数（原文/译文对）；断句较碎时需要更多上下文保证翻译连贯
+    /// 附带的上下文句数（原文/译文对）；0 = 不带上下文。
+    /// 断句较碎时需要更多上下文保证翻译连贯
     pub context_sentences: usize,
     /// 自定义 system prompt，支持 {from} / {to} 占位符
     pub prompt: Option<String>,

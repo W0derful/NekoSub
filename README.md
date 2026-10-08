@@ -152,7 +152,7 @@ to = "zh"                      # 翻译目标语言
 # api_key = ""                 # 不推荐，优先用环境变量
 max_tokens = 512
 temperature = 0.2
-context_sentences = 10         # 附带的上下文句数（原文/译文对，断句碎时保证翻译连贯）
+context_sentences = 10         # 附带的上下文句数（0 = 不带上下文；断句碎时保证翻译连贯）
 
 [display]
 timestamps = true
