@@ -277,8 +277,9 @@ impl Translator {
             max_tokens: opts.max_tokens,
             temperature: opts.temperature,
             system_prompt: build_system_prompt(opts.from, opts.to, opts.prompt),
-            // Ollama 空闲后会卸载模型，下次翻译要重新加载（+1~2s），让它常驻
-            keep_alive: (opts.provider == "ollama").then_some("-1"),
+            // Ollama 空闲后会卸载模型，下次翻译要重新加载（+1~2s），让它常驻。
+            // 注意：Ollama 按 Go duration 解析该字段，必须带单位（"-1" 会报 400）
+            keep_alive: (opts.provider == "ollama").then_some("8760h"),
         })
     }
 
@@ -394,12 +395,15 @@ fn anthropic_url(base: &str) -> String {
 }
 
 async fn send(req: reqwest::RequestBuilder) -> Result<String> {
-    let resp = req.send().await.map_err(|e| anyhow!("请求翻译 API 失败：{e}"))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| anyhow!("请求翻译服务失败：{e}"))?;
     let status = resp.status();
     let raw = resp.text().await.unwrap_or_default();
     if !status.is_success() {
         let snippet: String = raw.chars().take(200).collect();
-        bail!("翻译 API 返回 {status}：{snippet}");
+        bail!("翻译服务返回 {status}：{snippet}");
     }
     Ok(raw)
 }

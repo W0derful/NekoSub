@@ -89,6 +89,8 @@ fn dither_if_silent(chunk: &mut [f32]) {
 /// 连续说话超过 `max_sentence_sec` 仍未出现句尾静音时，注入一段合成静音，
 /// 触发管道内部的 VAD 复位（冲刷当前句并重置解码状态）——限制句子长度的
 /// 同时打断 whisper 长缓冲下的复读循环。
+///
+/// `stop` 置位后跳过收尾识别直接退出，让 Ctrl-C 能立即结束进程。
 pub fn spawn_worker(
     processor: OnlineAsrProcessor,
     input: AudioInputConfig,
@@ -96,6 +98,7 @@ pub fn spawn_worker(
     ev_tx: UnboundedSender<AsrEvent>,
     max_sentence_sec: f64,
     silence_reset_sec: f64,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<JoinHandle<Result<()>>> {
     let handle = std::thread::Builder::new()
         .name("nekosub-asr".to_string())
@@ -126,9 +129,11 @@ pub fn spawn_worker(
                     sec_since_finalize = 0.0;
                 }
             }
-            // 音频流关闭：冲刷管道里剩余的识别结果
-            let final_output = pipeline.finish()?;
-            let _ = ev_tx.send(AsrEvent::Finish(final_output));
+            // 音频流关闭：冲刷管道里剩余的识别结果（Ctrl-C 时跳过，立即退出）
+            if !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let final_output = pipeline.finish()?;
+                let _ = ev_tx.send(AsrEvent::Finish(final_output));
+            }
             Ok(())
         })
         .context("创建 ASR 线程失败")?;

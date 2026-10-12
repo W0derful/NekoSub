@@ -76,6 +76,7 @@ pub async fn run(cfg: &Config, cli_api_key: Option<&str>) -> Result<()> {
     let input = AudioInputConfig::new(capture.as_ref().unwrap().sample_rate, 1)
         .with_process_interval_sec(cfg.asr.process_interval_sec);
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<AsrEvent>();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = asr::spawn_worker(
         processor,
         input,
@@ -83,6 +84,7 @@ pub async fn run(cfg: &Config, cli_api_key: Option<&str>) -> Result<()> {
         ev_tx,
         cfg.asr.max_sentence_sec,
         cfg.vad.silence_reset_sec,
+        stop.clone(),
     )?;
     capture
         .as_ref()
@@ -151,9 +153,10 @@ pub async fn run(cfg: &Config, cli_api_key: Option<&str>) -> Result<()> {
                 state.flush(&mut renderer);
             }
             _ = tokio::signal::ctrl_c() => {
-                // 立即停止：不再等 ASR 冲刷与在途翻译
+                // 快速停止：不再等在途翻译；ASR 线程跳过收尾识别后立即退出
                 eprintln!("\n收到 Ctrl-C，已停止（在途翻译已丢弃）");
                 interrupted = true;
+                stop.store(true, std::sync::atomic::Ordering::SeqCst);
                 drop(capture.take());
                 break;
             }
@@ -182,10 +185,8 @@ pub async fn run(cfg: &Config, cli_api_key: Option<&str>) -> Result<()> {
     }
     renderer.clear_tentative();
 
-    // Ctrl-C 时不等待 ASR 线程（它可能还在做最后一次识别），随进程直接退出
-    if !interrupted {
-        let _ = worker.join().map_err(|_| anyhow::anyhow!("ASR 线程异常退出"));
-    }
+    // 等 ASR 线程退出：置位 stop 后它会跳过收尾识别，最多再等当前一次推理
+    let _ = worker.join().map_err(|_| anyhow::anyhow!("ASR 线程异常退出"));
     Ok(())
 }
 
