@@ -173,6 +173,37 @@ fn is_suspicious(source: &str, out: &str) -> bool {
     out.chars().count() > source.chars().count() * 4 + 30
 }
 
+/// 把文本归一化（去空白与标点）后按字符二元组比较，用于识别"抄上下文旧译文"。
+fn normalize_chars(s: &str) -> Vec<char> {
+    s.chars()
+        .filter(|c| !c.is_whitespace() && !c.is_ascii_punctuation() && !"。？！，、…—―·".contains(*c))
+        .collect()
+}
+
+fn bigram_containment(a: &[char], b: &[char]) -> f32 {
+    if a.len() < 2 || b.len() < 2 {
+        return if a == b { 1.0 } else { 0.0 };
+    }
+    let grams = |s: &[char]| {
+        s.windows(2)
+            .map(|w| (w[0], w[1]))
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let (ga, gb) = (grams(a), grams(b));
+    let inter = ga.intersection(&gb).count();
+    let denom = ga.len().min(gb.len()).max(1);
+    inter as f32 / denom as f32
+}
+
+/// 小翻译模型会把上下文示例里的旧译文当答案抄出来（轻微改写也算），
+/// 检测到就退回无上下文重译。
+fn repeats_context(history: &[Turn], out: &str) -> bool {
+    let o = normalize_chars(out);
+    history
+        .iter()
+        .any(|t| bigram_containment(&o, &normalize_chars(&t.target)) > 0.5)
+}
+
 /// 小翻译模型偶尔会把提示模板复述进译文（出现「原文：」「译文：」「上文」等标记）
 /// 或整段总结上文，只保留真正的译文部分，防止污染上下文后滚雪球。
 pub fn sanitize_translation(raw: &str) -> String {
@@ -291,8 +322,10 @@ impl Translator {
             }
             match self.try_translate(text, history).await {
                 Ok(raw) => {
-                    // 小翻译模型有时把上下文整段复述/总结出来，此时退回无上下文重译
-                    if history.is_empty() || !is_suspicious(text, &raw) {
+                    // 小翻译模型的两种典型失控：整段复述上下文、抄上下文里的旧译文。
+                    // 命中就退回无上下文重译。
+                    let bad = is_suspicious(text, &raw) || repeats_context(history, &raw);
+                    if history.is_empty() || !bad {
                         return finish_text(&raw);
                     }
                     match self.try_translate(text, &[]).await {
@@ -567,5 +600,22 @@ mod tests {
         assert!(is_suspicious("ねえ", ""));
         assert!(is_suspicious("ねえ", "嗯。是啊。好的。知道了。"));
         assert!(!is_suspicious("そうねみんなのおすすめいっぱい聞けて面白かったな", "是啊，能听到很多人的推荐，真是有趣啊。"));
+    }
+
+    #[test]
+    fn detects_context_answer_theft() {
+        // 实际日志里的串台：模型抄了上下文里的旧译文
+        let history = vec![
+            Turn { source: "超レアアイテムがあるんだよね".into(), target: "有非常罕见的物品呢。".into() },
+            Turn { source: "おはようございます".into(), target: "早上好".into() },
+        ];
+        // 完全照抄
+        assert!(repeats_context(&history, "有非常罕见的物品呢。"));
+        assert!(repeats_context(&history, "早上好"));
+        // 轻微改写 + 混入真译文（00:59 那句）
+        assert!(repeats_context(&history, "有些非常罕见的物品呢。你还在加拿大留学吗？一如既往啊。"));
+        // 正常译文不应误伤
+        assert!(!repeats_context(&history, "从现在开始就瞄准这个目标了。"));
+        assert!(!repeats_context(&[], "随便什么"));
     }
 }
