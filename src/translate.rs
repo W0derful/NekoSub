@@ -207,6 +207,8 @@ pub struct Translator {
     max_tokens: u32,
     temperature: f32,
     system_prompt: String,
+    /// Ollama 扩展字段：模型常驻时长（"-1" = 永不卸载），其他后端忽略
+    keep_alive: Option<&'static str>,
 }
 
 pub struct TranslatorOptions<'a> {
@@ -275,6 +277,8 @@ impl Translator {
             max_tokens: opts.max_tokens,
             temperature: opts.temperature,
             system_prompt: build_system_prompt(opts.from, opts.to, opts.prompt),
+            // Ollama 空闲后会卸载模型，下次翻译要重新加载（+1~2s），让它常驻
+            keep_alive: (opts.provider == "ollama").then_some("-1"),
         })
     }
 
@@ -324,6 +328,7 @@ impl Translator {
             ],
             max_tokens: self.max_tokens,
             temperature: self.temperature,
+            keep_alive: self.keep_alive,
         };
 
         let mut req = self.client.post(&url).json(&body);
@@ -413,6 +418,8 @@ struct ChatRequest<'a> {
     messages: Vec<Message>,
     max_tokens: u32,
     temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keep_alive: Option<&'a str>,
 }
 
 #[derive(Serialize)]
