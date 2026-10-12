@@ -130,7 +130,7 @@ pub async fn run(cfg: &Config, cli_api_key: Option<&str>) -> Result<()> {
     );
 
     // 5. 主循环：识别事件 / 翻译结果 / Ctrl-C
-    let mut stopping = false;
+    let mut interrupted = false;
     loop {
         tokio::select! {
             ev = ev_rx.recv() => {
@@ -150,29 +150,42 @@ pub async fn run(cfg: &Config, cli_api_key: Option<&str>) -> Result<()> {
                 state.pending.insert(seq, (ts, source, result));
                 state.flush(&mut renderer);
             }
-            _ = tokio::signal::ctrl_c(), if !stopping => {
-                eprintln!("\n收到 Ctrl-C，正在停止…");
-                stopping = true;
-                // 关闭音频流，让 ASR 线程冲刷并退出
+            _ = tokio::signal::ctrl_c() => {
+                // 立即停止：不再等 ASR 冲刷与在途翻译
+                eprintln!("\n收到 Ctrl-C，已停止（在途翻译已丢弃）");
+                interrupted = true;
                 drop(capture.take());
+                break;
             }
         }
     }
 
-    // 6. 等待在途翻译完成后按序输出
-    while state.next_seq <= state.seq {
-        match tokio::time::timeout(Duration::from_secs(20), res_rx.recv()).await {
-            Ok(Some(msg)) => {
-                let (seq, ts, source, result) = msg;
-                state.pending.insert(seq, (ts, source, result));
-                state.flush(&mut renderer);
+    // 6. 收尾
+    if interrupted {
+        // Ctrl-C 后只回收已经完成的翻译结果，直接退出
+        while let Ok((seq, ts, source, result)) = res_rx.try_recv() {
+            state.pending.insert(seq, (ts, source, result));
+        }
+        state.flush(&mut renderer);
+    } else {
+        // 音频流自然结束：等待在途翻译完成后按序输出
+        while state.next_seq <= state.seq {
+            match tokio::time::timeout(Duration::from_secs(20), res_rx.recv()).await {
+                Ok(Some(msg)) => {
+                    let (seq, ts, source, result) = msg;
+                    state.pending.insert(seq, (ts, source, result));
+                    state.flush(&mut renderer);
+                }
+                _ => break,
             }
-            _ => break,
         }
     }
     renderer.clear_tentative();
 
-    let _ = worker.join().map_err(|_| anyhow::anyhow!("ASR 线程异常退出"));
+    // Ctrl-C 时不等待 ASR 线程（它可能还在做最后一次识别），随进程直接退出
+    if !interrupted {
+        let _ = worker.join().map_err(|_| anyhow::anyhow!("ASR 线程异常退出"));
+    }
     Ok(())
 }
 
